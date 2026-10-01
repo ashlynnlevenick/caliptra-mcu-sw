@@ -3,7 +3,7 @@
 //! Minimal `FW_INFO` mailbox helper.
 
 use crate::raw::{raw_mailbox_execute, CMD_FW_INFO};
-use crate::ApiAlloc;
+use crate::ScratchAlloc;
 use mcu_error::codes::INVARIANT;
 use mcu_error::McuResult;
 
@@ -22,7 +22,7 @@ pub struct FwInfo {
     pub vendor_pqc_pub_key_index: u32,
 }
 
-pub async fn fw_info<A: ApiAlloc>(alloc: &A) -> McuResult<FwInfo> {
+pub async fn fw_info<A: ScratchAlloc>(alloc: &A) -> McuResult<FwInfo> {
     let mut req = alloc.alloc(REQ_SIZE)?;
     req.fill(0);
     let mut rsp = alloc.alloc(RSP_SIZE)?;
