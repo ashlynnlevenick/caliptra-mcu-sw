@@ -127,9 +127,11 @@ fn handle_i3c_socket_connection(
 
     while crate::is_emulator_running() {
         // try reading from TCP socket (non-blocking)
+        let mut got_cmd = false;
         let mut incoming_header_bytes = [0u8; 9];
         match stream.read_exact(&mut incoming_header_bytes) {
             Ok(()) => {
+                got_cmd = true;
                 let incoming_header: IncomingHeader = transmute!(incoming_header_bytes);
                 let cmd: I3cTcriCommand = incoming_header.command.try_into().unwrap();
                 // For read commands (rnw=1), data_length specifies how much to
@@ -198,11 +200,11 @@ fn handle_i3c_socket_connection(
                     panic!("Error writing message to socket: {}", e);
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
+            Err(std::sync::mpsc::TryRecvError::Empty) if !got_cmd => {
                 // Brief sleep to avoid busy-spinning while still being responsive.
                 // Using thread::sleep instead of condvar to avoid depending on
                 // emulator tick notifications (which may stall during warm reboot).
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::sleep(std::time::Duration::from_micros(100));
             }
             Err(_) => {}
         }

@@ -71,7 +71,7 @@ impl I3cController {
                     .for_each(|resp| {
                         tx.send(resp.clone()).unwrap();
                     });
-                if let Ok(cmd) = rx.recv_timeout(Duration::from_millis(5)) {
+                if let Ok(cmd) = rx.recv_timeout(Duration::from_micros(100)) {
                     I3cController::incoming(targets.clone(), counter.clone(), cmd);
                 }
             }
