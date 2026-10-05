@@ -207,7 +207,11 @@ mod test {
         )
     }
 
-    fn create_update_package() -> (PathBuf, PathBuf, PathBuf, String, PathBuf, Vec<PathBuf>) {
+    // The update image carries the DUT's own runtime, like the prebuilt (CI)
+    // bundle: after the hitless reset it sees the reset reason and exits.
+    fn create_update_package(
+        feature: &str,
+    ) -> (PathBuf, PathBuf, PathBuf, String, PathBuf, Vec<PathBuf>) {
         // Build the update PLDM firmware package
         let update_soc_image_fw_1 = [0x66u8; 512];
         let update_soc_image_fw_2 = [0xBBu8; 256];
@@ -235,7 +239,6 @@ mod test {
                 ..Default::default()
             },
         ];
-        let feature = "test-flash-based-boot";
         let update_runtime_firmware = compile_runtime(Some(feature), false);
         let mcu_cfg = ImageCfg {
             path: update_runtime_firmware.clone(),
@@ -745,7 +748,7 @@ mod test {
             update_soc_manifest,
             update_runtime_firmware,
             update_soc_images_paths,
-        ) = create_update_package();
+        ) = create_update_package(feature);
 
         // Compile the runtime once with the appropriate feature
         let test_runtime = compile_runtime(Some(feature), false);
