@@ -55,6 +55,8 @@ impl<
             return Err(());
         }
 
+        crate::bench::init();
+
         let (event_queue_tx, event_queue_rx) = mpsc::channel();
         let event_queue_tx_clone1 = event_queue_tx.clone();
         let event_queue_tx_clone2 = event_queue_tx.clone();
@@ -178,6 +180,7 @@ impl<
                         // The delay needs to be long enough for the MCU to boot,
                         // start the runtime, and initialize the PLDM service.
                         std::thread::sleep(Duration::from_secs(2));
+                        crate::bench::mark(crate::bench::Milestone::DiscoveryStart);
 
                         // Start Discovery
                         let discovery_sm = &mut *discovery_sm.lock().unwrap();

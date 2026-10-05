@@ -76,6 +76,7 @@ impl Bus for EmuCtrl {
     fn write(&mut self, _size: RvSize, addr: RvAddr, val: RvData) -> Result<(), BusError> {
         match addr {
             EmuCtrl::ADDR_EXIT => {
+                caliptra_mcu_testing_common::run_exit_hooks(val as i32);
                 exit(val as i32);
             }
             _ => Err(BusError::StoreAccessFault)?,

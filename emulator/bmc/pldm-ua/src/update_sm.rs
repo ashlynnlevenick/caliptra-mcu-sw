@@ -220,6 +220,7 @@ pub trait StateMachineActions {
         ctx.current_component_index = None;
         ctx.transferred_bytes = 0;
         ctx.transfer_start_time = None;
+        crate::bench::mark(crate::bench::Milestone::UpdateStart);
 
         send_message_helper(
             ctx,
@@ -360,6 +361,7 @@ pub trait StateMachineActions {
             return Err(());
         }
         let component = &ctx.components[ctx.current_component_index.unwrap()];
+        crate::bench::set_component_size(component.size);
         let request = pldm_packet::update_component::UpdateComponentRequest::new(
             ctx.instance_id,
             PldmMsgType::Request,
@@ -716,6 +718,7 @@ pub trait StateMachineActions {
             );
 
             ctx.transferred_bytes += request.length;
+            crate::bench::record_chunk(request.length);
             // Initialize transfer start time on first chunk
             if ctx.transfer_start_time.is_none() {
                 ctx.transfer_start_time = Some(Instant::now());
@@ -752,6 +755,7 @@ pub trait StateMachineActions {
         ctx: &mut InnerContext<impl PldmSocket + Send + 'static>,
         request: pldm_packet::transfer_complete::TransferCompleteRequest,
     ) -> Result<(), ()> {
+        crate::bench::mark(crate::bench::Milestone::TransferComplete);
         let response = pldm_packet::transfer_complete::TransferCompleteResponse::new(
             request.hdr.instance_id(),
             PldmBaseCompletionCode::Success as u8,
@@ -796,6 +800,7 @@ pub trait StateMachineActions {
         ctx: &mut InnerContext<impl PldmSocket + Send + 'static>,
         request: pldm_packet::verify_complete::VerifyCompleteRequest,
     ) -> Result<(), ()> {
+        crate::bench::mark(crate::bench::Milestone::VerifyComplete);
         let response = pldm_packet::verify_complete::VerifyCompleteResponse::new(
             request.hdr.instance_id(),
             PldmBaseCompletionCode::Success as u8,
@@ -918,6 +923,7 @@ pub trait StateMachineActions {
         ctx: &mut InnerContext<impl PldmSocket + Send + 'static>,
         request: pldm_packet::apply_complete::ApplyCompleteRequest,
     ) -> Result<(), ()> {
+        crate::bench::mark(crate::bench::Milestone::ApplyComplete);
         let response = pldm_packet::apply_complete::ApplyCompleteResponse::new(
             request.hdr.instance_id(),
             PldmBaseCompletionCode::Success as u8,
@@ -1042,6 +1048,7 @@ pub trait StateMachineActions {
         ctx: &mut InnerContext<impl PldmSocket + Send + 'static>,
         response: pldm_packet::activate_fw::ActivateFirmwareResponse,
     ) -> Result<(), ()> {
+        crate::bench::mark(crate::bench::Milestone::ActivateResponse);
         ctx.instance_id = ctx.instance_id.wrapping_add(1); // Response received, increment instance id
         if response.completion_code == PldmBaseCompletionCode::Success as u8 {
             info!("ActivateFirmware response success");

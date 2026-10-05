@@ -295,6 +295,38 @@ pub fn update_ticks(ticks: u64) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Process exit hooks
+// ---------------------------------------------------------------------------
+
+type ExitHook = Box<dyn FnOnce(i32) + Send>;
+
+/// Process-wide list of hooks to run right before the emulator process exits.
+///
+/// Firmware terminates the emulator through a hard `std::process::exit` (see
+/// `EmuCtrl`), which kills every host-side worker thread mid-flight. Workers
+/// that need to flush end-of-run data (e.g. benchmark reports from the PLDM
+/// update agent) register a hook here instead.
+static EXIT_HOOKS: Mutex<Vec<ExitHook>> = Mutex::new(Vec::new());
+
+/// Register a hook that runs (once) right before the emulator process exits.
+/// The hook receives the exit code requested by the firmware.
+pub fn register_exit_hook(hook: impl FnOnce(i32) + Send + 'static) {
+    EXIT_HOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(Box::new(hook));
+}
+
+/// Run and drain all registered exit hooks. Called by the emulator right
+/// before it terminates the process.
+pub fn run_exit_hooks(exit_code: i32) {
+    let hooks = std::mem::take(&mut *EXIT_HOOKS.lock().unwrap_or_else(|e| e.into_inner()));
+    for hook in hooks {
+        hook(exit_code);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
