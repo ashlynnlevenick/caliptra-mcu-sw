@@ -3,8 +3,9 @@
 #[cfg(test)]
 mod test {
     use crate::test::{
-        compile_runtime, finish_runtime_hw_model, get_rom_with_feature, has_prebuilt_binaries,
-        run_runtime, start_runtime_hw_model, TestParams, TEST_LOCK,
+        compile_runtime, compile_runtime_with_profile, finish_runtime_hw_model,
+        get_rom_with_feature, has_prebuilt_binaries, run_runtime, start_runtime_hw_model,
+        TestParams, TEST_LOCK,
     };
     #[cfg(feature = "fpga_realtime")]
     use crate::test_fpga_flash_ctrl::test::{
@@ -217,10 +218,36 @@ mod test {
         )
     }
 
+    /// Firmware build overrides (used by benchmarks).
+    #[derive(Clone, Copy)]
+    struct BuildOverrides<'a> {
+        /// Build profile, e.g. "release".
+        profile: &'a str,
+        /// Comma-separated features added to the runtime build only; the ROM
+        /// and image metadata keep the base feature.
+        extra_features: Option<&'a str>,
+    }
+
+    // Builds a runtime for `feature`. Without `overrides`, the profile is the
+    // default (`MCU_TEST_PROFILE` env var, else devel).
+    fn build_runtime(feature: &str, overrides: Option<BuildOverrides>) -> PathBuf {
+        match overrides {
+            Some(o) => {
+                let features = match o.extra_features {
+                    Some(extra) => format!("{feature},{extra}"),
+                    None => feature.to_string(),
+                };
+                compile_runtime_with_profile(Some(&features), false, Some(o.profile))
+            }
+            None => compile_runtime(Some(feature), false),
+        }
+    }
+
     // The update image carries the DUT's own runtime, like the prebuilt (CI)
     // bundle: after the hitless reset it sees the reset reason and exits.
     fn create_update_package(
         feature: &str,
+        overrides: Option<BuildOverrides>,
     ) -> (PathBuf, PathBuf, PathBuf, String, PathBuf, Vec<PathBuf>) {
         // Build the update PLDM firmware package
         let update_soc_image_fw_1 = [0x66u8; 512];
@@ -249,7 +276,7 @@ mod test {
                 ..Default::default()
             },
         ];
-        let update_runtime_firmware = compile_runtime(Some(feature), false);
+        let update_runtime_firmware = build_runtime(feature, overrides);
         let mcu_cfg = ImageCfg {
             path: update_runtime_firmware.clone(),
             load_addr: MCI_BASE_AXI_ADDRESS + MCU_SRAM_OFFSET,
@@ -517,7 +544,7 @@ mod test {
         }
 
         println!("Building binaries for feature: {}", feature);
-        create_firmware_update_test_options_build(feature, use_flash, i3c_port)
+        create_firmware_update_test_options_build(feature, use_flash, i3c_port, None)
     }
 
     // Creates test options using prebuilt binaries from CPTRA_FIRMWARE_BUNDLE
@@ -707,11 +734,13 @@ mod test {
         }
     }
 
-    // Creates test options by building everything from scratch
+    // Creates test options by building everything from scratch.
+    // `overrides` adjusts the firmware runtime build (see `build_runtime`).
     fn create_firmware_update_test_options_build(
         feature: &'static str,
         use_flash: bool,
         i3c_port: u32,
+        overrides: Option<BuildOverrides>,
     ) -> TestOptions {
         let soc_image_fw_1 = [0x55u8; 512]; // Example firmware data for SOC image 1
         let soc_image_fw_2 = [0xAAu8; 256]; // Example firmware data for SOC image 2
@@ -724,10 +753,10 @@ mod test {
             update_soc_manifest,
             update_runtime_firmware,
             update_soc_images_paths,
-        ) = create_update_package(feature);
+        ) = create_update_package(feature, overrides);
 
         // Compile the runtime once with the appropriate feature
-        let test_runtime = compile_runtime(Some(feature), false);
+        let test_runtime = build_runtime(feature, overrides);
 
         let soc_images_paths = create_soc_images(vec![
             soc_image_fw_1.clone().to_vec(),
@@ -877,7 +906,7 @@ mod test {
             format!("0x{:016x}", MCI_BASE_AXI_ADDRESS),
         );
         let i3c_port: u32 = PortPicker::new().random(true).pick().unwrap().into();
-        let opts = create_firmware_update_test_options_build(feature, true, i3c_port);
+        let opts = create_firmware_update_test_options_build(feature, true, i3c_port, None);
         let opts = fast_update_options(&opts);
         let test = run_runtime_with_options(&opts);
         // The UA exits with 0 when the FD rejects the component update
@@ -917,6 +946,123 @@ mod test {
         lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Builds release firmware from source (prebuilt bundles are devel) and
+    /// returns the test options plus a memory-usage report for the DUT runtime.
+    /// With `PLDM_BENCH_SKIP_VALIDATION` set, the runtime is built with
+    /// `bench-skip-validation`: no device-side verify, flash copy or reset.
+    fn create_benchmark_options() -> (TestOptions, String) {
+        let feature = "test-firmware-update-flash";
+        env::set_var(
+            "CPTRA_EMULATOR_SS_MCI_OFFSET",
+            format!("0x{:016x}", MCI_BASE_AXI_ADDRESS),
+        );
+        let i3c_port: u32 = PortPicker::new().random(true).pick().unwrap().into();
+        let overrides = BuildOverrides {
+            // Release strips debug output, closer to the work done on silicon.
+            profile: "release",
+            extra_features: bench::skip_validation_requested().then_some("bench-skip-validation"),
+        };
+        let opts =
+            create_firmware_update_test_options_build(feature, true, i3c_port, Some(overrides));
+        // The DUT runtime is the last runtime built, so the kernel/app ELFs
+        // next to it belong to it. Capture sizes now; print after the run.
+        let report = memory_usage_report(&opts.runtime);
+        (opts, report)
+    }
+
+    /// Runs the emulator with UA benchmark instrumentation enabled. The UA
+    /// prints its PLDM summary when the firmware exits; the memory report is
+    /// printed afterwards so all results appear together at the end.
+    fn run_benchmark(name: &str, opts: &TestOptions, memory_report: &str) -> i32 {
+        env::set_var(bench::BENCH_ENV, "1");
+        let result = run_runtime_with_options(opts);
+        env::remove_var(bench::BENCH_ENV);
+        let validation = if bench::skip_validation_requested() {
+            "skipped"
+        } else {
+            "performed"
+        };
+        println!("benchmark: {name} (profile: release, device-side validation: {validation})");
+        println!("{memory_report}");
+        result
+    }
+
+    /// Allocated sections of a 32-bit little-endian ELF: (name, occupies RAM, size).
+    /// A section occupies RAM if it is writable or NOBITS (e.g. NOLOAD stacks).
+    fn elf32_alloc_sections(path: &std::path::Path) -> Option<Vec<(String, bool, u32)>> {
+        const SHF_WRITE: u32 = 0x1;
+        const SHF_ALLOC: u32 = 0x2;
+        const SHT_NOBITS: u32 = 8;
+        let data = std::fs::read(path).ok()?;
+        let u16_at = |o: usize| Some(u16::from_le_bytes(data.get(o..o + 2)?.try_into().ok()?));
+        let u32_at = |o: usize| Some(u32::from_le_bytes(data.get(o..o + 4)?.try_into().ok()?));
+        // ELF32 magic + class.
+        if data.get(0..5)? != b"\x7fELF\x01" {
+            return None;
+        }
+        let shoff = u32_at(0x20)? as usize;
+        let shentsize = u16_at(0x2e)? as usize;
+        let shnum = u16_at(0x30)? as usize;
+        let shstrndx = u16_at(0x32)? as usize;
+        let strtab_off = u32_at(shoff + shstrndx * shentsize + 16)? as usize;
+        let mut sections = vec![];
+        for i in 0..shnum {
+            let sh = shoff + i * shentsize;
+            let flags = u32_at(sh + 8)?;
+            if flags & SHF_ALLOC == 0 {
+                continue;
+            }
+            let ram = flags & SHF_WRITE != 0 || u32_at(sh + 4)? == SHT_NOBITS;
+            let name_off = strtab_off + u32_at(sh)? as usize;
+            let name_len = data.get(name_off..)?.iter().position(|b| *b == 0)?;
+            let name = String::from_utf8_lossy(&data[name_off..name_off + name_len]).into_owned();
+            sections.push((name, ram, u32_at(sh + 20)?));
+        }
+        Some(sections)
+    }
+
+    /// Memory usage of the kernel and user-app ELFs that make up `runtime_bin`.
+    fn memory_usage_report(runtime_bin: &std::path::Path) -> String {
+        use std::fmt::Write;
+        let dir = runtime_bin.parent().unwrap();
+        let mut out = String::new();
+        let _ = writeln!(out, "===== MCU runtime memory usage =====");
+        let bin_size = std::fs::metadata(runtime_bin).map(|m| m.len()).unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "runtime image: {} ({bin_size} B)",
+            runtime_bin.file_name().unwrap().to_string_lossy()
+        );
+        let mut total_ro = 0u64;
+        let mut total_rw = 0u64;
+        for elf in ["caliptra-mcu-runtime-emulator", "user-app"] {
+            let Some(sections) = elf32_alloc_sections(&dir.join(elf)) else {
+                let _ = writeln!(out, "  {elf}: ELF not found or unreadable");
+                continue;
+            };
+            let _ = writeln!(out, "  {elf}:");
+            let (mut ro, mut rw) = (0u64, 0u64);
+            for (name, ram, size) in sections.iter().filter(|s| s.2 > 0) {
+                let kind = if *ram { "rw" } else { "ro" };
+                let _ = writeln!(out, "    {name:<16} {kind} {size:>9} B");
+                if *ram {
+                    rw += *size as u64;
+                } else {
+                    ro += *size as u64;
+                }
+            }
+            let _ = writeln!(out, "    {:<16}    {ro:>9} B ro, {rw} B rw", "subtotal");
+            total_ro += ro;
+            total_rw += rw;
+        }
+        let _ = writeln!(
+            out,
+            "  total: {total_ro} B read-only (code/rodata), {total_rw} B read-write (data/bss/stack/heap)"
+        );
+        let _ = write!(out, "====================================");
+        out
+    }
+
     /// PLDM throughput benchmark: transfers a fixed 64 KiB payload over the
     /// HwModel (emulator or FPGA). The `test-firmware-update-bench` runtime
     /// stages each chunk but skips verify/apply/activate, then exits.
@@ -944,6 +1090,8 @@ mod test {
 
         let mut hw = start_runtime_hw_model(TestParams {
             feature: Some(FEATURE),
+            // From-source builds only; a bundle uses the profile it was built with.
+            profile: Some("release"),
             i3c_port: Some(PortPicker::new().random(true).pick().unwrap()),
             ..Default::default()
         });
@@ -980,6 +1128,17 @@ mod test {
         env::remove_var(bench::BENCH_ENV);
         env::remove_var(bench::SKIP_VALIDATION_ENV);
         assert_eq!(0, status);
+        lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// PLDM benchmark of the full flash update flow: downloads the entire
+    /// update flash image, then verify, apply, activate and hitless reset.
+    #[test]
+    fn test_firmware_update_benchmark_full() {
+        let lock = TEST_LOCK.lock().unwrap();
+        let (opts, memory_report) = create_benchmark_options();
+        let test = run_benchmark("full flash update", &opts, &memory_report);
+        assert_eq!(0, test);
         lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 

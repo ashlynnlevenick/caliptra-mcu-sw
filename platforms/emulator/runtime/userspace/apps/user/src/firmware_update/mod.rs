@@ -411,6 +411,11 @@ mod flash_memory {
     #[async_trait]
     impl StagingMemory for ExternalFlash {
         async fn write(&self, offset: usize, data: &[u8]) -> Result<(), ErrorCode> {
+            // Benchmark: measure PLDM transfer only. Nothing reads the staged
+            // image back when validation is skipped, so discard the data.
+            if cfg!(feature = "bench-skip-validation") {
+                return Ok(());
+            }
             self.flash_syscall.write(offset, data.len(), data).await
         }
 
