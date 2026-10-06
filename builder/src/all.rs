@@ -1253,6 +1253,7 @@ pub fn all_build(args: AllBuildArgs) -> Result<()> {
             // For firmware update tests, create a separate "update" flash image WITHOUT partition table
             // This is used for the PLDM update package (the downloaded firmware)
             let is_firmware_update_feature = *feature == "test-firmware-update-flash"
+                || *feature == "test-firmware-update-bench"
                 || *feature == "test-firmware-update-streaming"
                 || *feature == "test-streaming-boot-flash-write-back"
                 || *feature == "test-firmware-activate"

@@ -1063,33 +1063,27 @@ mod test {
         out
     }
 
-    /// PLDM throughput benchmark: transfers a fixed 64 KiB payload over the
-    /// HwModel (emulator or FPGA). The `test-firmware-update-bench` runtime
-    /// stages each chunk but skips verify/apply/activate, then exits.
+    /// Runtime feature for the HwModel PLDM benchmarks.
+    const BENCH_FEATURE: &str = "test-firmware-update-bench";
+
+    /// PLDM throughput benchmark: transfers `image` as the component payload
+    /// over the HwModel (emulator or FPGA). The `test-firmware-update-bench`
+    /// runtime stages each chunk but skips verify/apply/activate, then exits.
     /// Firmware comes from CPTRA_FIRMWARE_BUNDLE (`xtask all-build` /
     /// `xtask fpga build`) when present, otherwise it is built from source.
-    #[test]
-    fn test_firmware_update_benchmark_64k() {
-        const FEATURE: &str = "test-firmware-update-bench";
-        const PAYLOAD: usize = 64 * 1024;
-        let lock = TEST_LOCK.lock().unwrap();
-
-        // Payload content is never parsed in skip mode, only staged.
-        let image: Vec<u8> = (0..PAYLOAD).map(|i| i as u8).collect();
-        let pkg = get_streaming_boot_pldm_fw_manifest(&get_device_uuid(), &image);
+    fn run_hw_benchmark(label: &str, image: &[u8]) {
+        let pkg = get_streaming_boot_pldm_fw_manifest(&get_device_uuid(), image);
 
         // On the emulator, firmware exit ends this process from inside
         // hw.step() (after the UA exit hook prints its summary), so print the
         // header first.
-        println!(
-            "benchmark: fixed 64 KiB payload (device-side validation: skipped; use wall time)"
-        );
+        println!("benchmark: {label} (device-side validation: skipped; use wall time)");
 
         env::set_var(bench::BENCH_ENV, "1");
         env::set_var(bench::SKIP_VALIDATION_ENV, "1");
 
         let mut hw = start_runtime_hw_model(TestParams {
-            feature: Some(FEATURE),
+            feature: Some(BENCH_FEATURE),
             // From-source builds only; a bundle uses the profile it was built with.
             profile: Some("release"),
             i3c_port: Some(PortPicker::new().random(true).pick().unwrap()),
@@ -1128,6 +1122,39 @@ mod test {
         env::remove_var(bench::BENCH_ENV);
         env::remove_var(bench::SKIP_VALIDATION_ENV);
         assert_eq!(0, status);
+    }
+
+    /// HwModel PLDM benchmark with a fixed 64 KiB payload.
+    #[test]
+    fn test_firmware_update_benchmark_64k() {
+        const PAYLOAD: usize = 64 * 1024;
+        let lock = TEST_LOCK.lock().unwrap();
+        // Payload content is never parsed in skip mode, only staged.
+        let image: Vec<u8> = (0..PAYLOAD).map(|i| i as u8).collect();
+        run_hw_benchmark("fixed 64 KiB payload", &image);
+        lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// HwModel PLDM benchmark with a real update flash image as the payload
+    /// (Caliptra FW, SoC manifest, MCU runtime, SoC images), to expose costs
+    /// that only show up over a long transfer. Same firmware and harness as
+    /// the 64 KiB benchmark; only the payload differs.
+    #[test]
+    fn test_firmware_update_benchmark_firmware() {
+        let lock = TEST_LOCK.lock().unwrap();
+        let image = FirmwareBinaries::from_env()
+            .ok()
+            .and_then(|binaries| binaries.test_update_flash_image(BENCH_FEATURE).ok())
+            .unwrap_or_else(|| {
+                let release = BuildOverrides {
+                    profile: "release",
+                    extra_features: None,
+                };
+                let (_, path, ..) = create_update_package(BENCH_FEATURE, Some(release));
+                std::fs::read(path).expect("Failed to read update flash image")
+            });
+        let label = format!("firmware update image ({} B payload)", image.len());
+        run_hw_benchmark(&label, &image);
         lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
