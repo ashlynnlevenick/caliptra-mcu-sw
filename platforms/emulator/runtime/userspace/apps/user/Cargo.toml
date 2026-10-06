@@ -189,6 +189,10 @@ test-defmt-logging-vdm = ["userspace-log", "mcu-mbox-service", "mctp-vdm-service
 test-flash-based-boot = ["flash-boot"]
 test-firmware-activate = ["firmware-update"]
 test-firmware-update-flash = ["flash-boot", "firmware-update"]
+# Benchmark-only: after the PLDM download, report verify/apply/activate success
+# without verifying, copying or activating the image, then exit.
+bench-skip-validation = []
+test-firmware-update-bench = ["flash-boot", "firmware-update", "bench-skip-validation"]
 test-firmware-update-reject = ["flash-boot", "firmware-update"]
 test-firmware-update-streaming = []
 test-firmware-v2 = []

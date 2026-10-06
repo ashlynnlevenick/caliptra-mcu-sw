@@ -3,7 +3,12 @@
 #[cfg(test)]
 mod test {
     use crate::test::{
-        compile_runtime, get_rom_with_feature, has_prebuilt_binaries, run_runtime, TEST_LOCK,
+        compile_runtime, finish_runtime_hw_model, get_rom_with_feature, has_prebuilt_binaries,
+        run_runtime, start_runtime_hw_model, TestParams, TEST_LOCK,
+    };
+    #[cfg(feature = "fpga_realtime")]
+    use crate::test_fpga_flash_ctrl::test::{
+        run_imaginary_flash_controller_service, run_imaginary_flash_controller_service_with_init,
     };
     use caliptra_image_types::ImageManifest;
     use caliptra_mcu_builder::{CaliptraBuildArgs, CaliptraBuilder, FirmwareBinaries, ImageCfg};
@@ -12,12 +17,17 @@ mod test {
         PartitionTable, StandAloneChecksumCalculator, STAGING_PARTITION,
     };
     use caliptra_mcu_flash_image::{MCU_RT_IDENTIFIER, SOC_IMAGES_BASE_IDENTIFIER};
+    use caliptra_mcu_hw_model::McuHwModel;
     use caliptra_mcu_pldm_fw_pkg::manifest::{
         ComponentImageInformation, Descriptor, DescriptorType, FirmwareDeviceIdRecord,
         PackageHeaderInformation, StringType,
     };
     use caliptra_mcu_pldm_fw_pkg::FirmwareManifest;
-    use caliptra_mcu_testing_common::DeviceLifecycle;
+    use caliptra_mcu_pldm_ua::daemon::{Options, PldmDaemon};
+    use caliptra_mcu_pldm_ua::transport::{EndpointId, PldmTransport};
+    use caliptra_mcu_pldm_ua::{bench, discovery_sm, update_sm};
+    use caliptra_mcu_testing_common::mctp_transport::MctpTransport;
+    use caliptra_mcu_testing_common::{run_exit_hooks, stop_emulator, DeviceLifecycle};
     use chrono::{TimeZone, Utc};
     use hex::ToHex;
     use random_port::PortPicker;
@@ -331,40 +341,6 @@ mod test {
             secondary_flash_content.resize(download_partition_offset, 0);
         }
         // Append the full flash image in the DOWNLOAD partition
-        secondary_flash_content.append(&mut flash_image.clone());
-
-        std::fs::write(secondary_flash_image_path.clone(), secondary_flash_content)
-            .expect("Failed to write secondary flash image");
-
-        new_opts.secondary_flash_image_path = Some(secondary_flash_image_path.clone());
-        new_opts
-    }
-
-    /// Like fast_update_options but with a configurable transfer size for benchmarking.
-    /// Pre-populates secondary flash so verify/apply succeeds regardless of transfer size.
-    fn benchmark_options(success_opts: &TestOptions, transfer_size: usize) -> TestOptions {
-        let mut new_opts = success_opts.clone();
-        let update_flash_image_path = new_opts.update_flash_image_path.as_ref().unwrap().clone();
-        let flash_image =
-            std::fs::read(update_flash_image_path.clone()).expect("Failed to read flash image");
-
-        let truncated_flash_image = &flash_image[..transfer_size.min(flash_image.len())];
-        let pldm_manifest =
-            get_streaming_boot_pldm_fw_manifest(&get_device_uuid(), truncated_flash_image);
-        let pldm_fw_pkg_path = create_pldm_fw_package(&pldm_manifest);
-        new_opts.pldm_fw_pkg_path = Some(pldm_fw_pkg_path);
-
-        let secondary_flash_image_path = tempfile::NamedTempFile::new()
-            .expect("Failed to create temp file")
-            .path()
-            .to_path_buf();
-
-        // Pre-populate secondary flash with full valid image
-        let mut secondary_flash_content = flash_image.clone().to_vec();
-        let download_partition_offset = STAGING_PARTITION.offset;
-        if secondary_flash_content.len() < download_partition_offset {
-            secondary_flash_content.resize(download_partition_offset, 0);
-        }
         secondary_flash_content.append(&mut flash_image.clone());
 
         std::fs::write(secondary_flash_image_path.clone(), secondary_flash_content)
@@ -941,15 +917,69 @@ mod test {
         lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// PLDM transfer benchmark: transfers 64KB to measure throughput.
-    /// Run with RUST_LOG=info to see KB/s output from the UA.
+    /// PLDM throughput benchmark: transfers a fixed 64 KiB payload over the
+    /// HwModel (emulator or FPGA). The `test-firmware-update-bench` runtime
+    /// stages each chunk but skips verify/apply/activate, then exits.
+    /// Firmware comes from CPTRA_FIRMWARE_BUNDLE (`xtask all-build` /
+    /// `xtask fpga build`) when present, otherwise it is built from source.
     #[test]
     fn test_firmware_update_benchmark_64k() {
+        const FEATURE: &str = "test-firmware-update-bench";
+        const PAYLOAD: usize = 64 * 1024;
         let lock = TEST_LOCK.lock().unwrap();
-        let opts = create_firmware_update_test_options(true);
-        let bench_opts = benchmark_options(&opts, 64 * 1024);
-        let test = run_runtime_with_options(&bench_opts);
-        assert_eq!(0, test);
+
+        // Payload content is never parsed in skip mode, only staged.
+        let image: Vec<u8> = (0..PAYLOAD).map(|i| i as u8).collect();
+        let pkg = get_streaming_boot_pldm_fw_manifest(&get_device_uuid(), &image);
+
+        // On the emulator, firmware exit ends this process from inside
+        // hw.step() (after the UA exit hook prints its summary), so print the
+        // header first.
+        println!(
+            "benchmark: fixed 64 KiB payload (device-side validation: skipped; use wall time)"
+        );
+
+        env::set_var(bench::BENCH_ENV, "1");
+        env::set_var(bench::SKIP_VALIDATION_ENV, "1");
+
+        let mut hw = start_runtime_hw_model(TestParams {
+            feature: Some(FEATURE),
+            i3c_port: Some(PortPicker::new().random(true).pick().unwrap()),
+            ..Default::default()
+        });
+        hw.start_i3c_controller();
+
+        // Must run on this thread: it holds the model's emulator state.
+        let transport =
+            MctpTransport::new(hw.i3c_port().unwrap(), hw.i3c_address().unwrap().into());
+        let socket = transport
+            .create_socket(EndpointId(0x08), EndpointId(0))
+            .unwrap();
+        let mut daemon = PldmDaemon::run(
+            socket,
+            Options {
+                caliptra_mcu_pldm_fw_pkg: Some(pkg),
+                discovery_sm_actions: discovery_sm::DefaultActions {},
+                update_sm_actions: update_sm::DefaultActions {},
+                fd_tid: 0x01,
+                rerun_count: 0,
+            },
+        )
+        .unwrap();
+
+        // FPGA staging flash is serviced by a host-side thread.
+        #[cfg(feature = "fpga_realtime")]
+        run_imaginary_flash_controller_service(hw.base.mmio.mci().unwrap().ptr as u64);
+
+        let status = finish_runtime_hw_model(&mut hw);
+        // FPGA: firmware exit is a UART byte, so print the UA summary here.
+        // (On the emulator the hooks already ran and this point is not reached.)
+        run_exit_hooks(status);
+        daemon.stop();
+        stop_emulator();
+        env::remove_var(bench::BENCH_ENV);
+        env::remove_var(bench::SKIP_VALIDATION_ENV);
+        assert_eq!(0, status);
         lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -964,7 +994,7 @@ mod test {
     #[test]
     fn test_firmware_update_streaming_fpga() {
         if env::var("PLDM_FW_PKG").is_err() {
-            if let Ok(binaries) = caliptra_mcu_builder::FirmwareBinaries::from_env() {
+            if let Ok(binaries) = FirmwareBinaries::from_env() {
                 // If PLDM_FW_PKG is not specified, we will use the PLDM firmware package
                 // for test-firmware-v2 that was built during the FPGA build.
                 // We choose this package since it is small enough to fit in the
@@ -996,18 +1026,10 @@ mod test {
     #[ignore]
     #[test]
     fn test_firmware_activate_fpga() {
-        use crate::test::{finish_runtime_hw_model, start_runtime_hw_model, TestParams};
-        use crate::test_fpga_flash_ctrl::test::{
-            run_imaginary_flash_controller_service,
-            run_imaginary_flash_controller_service_with_init,
-        };
-        use caliptra_mcu_hw_model::McuHwModel;
-
         let lock = TEST_LOCK.lock().unwrap();
         lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let binaries = caliptra_mcu_builder::FirmwareBinaries::from_env()
-            .expect("CPTRA_FIRMWARE_BUNDLE not set");
+        let binaries = FirmwareBinaries::from_env().expect("CPTRA_FIRMWARE_BUNDLE not set");
 
         let update_flash_image = binaries
             .test_flash_image("test-firmware-v2")
@@ -1030,7 +1052,7 @@ mod test {
         let test = finish_runtime_hw_model(&mut hw);
 
         assert_eq!(0, test);
-        caliptra_mcu_testing_common::stop_emulator();
+        stop_emulator();
 
         // force the compiler to keep the lock
         lock.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

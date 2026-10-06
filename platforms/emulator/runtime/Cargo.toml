@@ -123,6 +123,10 @@ test-flash-storage-erase = []
 test-flash-usermode = ["flash-boot"]
 test-firmware-activate = ["firmware-update"]
 test-firmware-update-flash = ["flash-boot", "firmware-update"]
+# Benchmark-only: skip device-side verify/apply/activation (handled in user-app).
+bench-skip-validation = []
+# PLDM throughput benchmark: firmware-update download only (no verify/apply/activate).
+test-firmware-update-bench = ["flash-boot", "firmware-update"]
 test-firmware-update-reject = ["flash-boot", "firmware-update"]
 test-firmware-update-streaming = ["firmware-update"]
 test-fpga-flash-ctrl = []

@@ -57,6 +57,7 @@ pub struct FirmwareUpdater<'a, D: DMAMapping, A: ApiAlloc> {
     dma_mapping: &'a D,
     spawner: Spawner,
     skip_activation: bool,
+    skip_validation: bool,
     verify_same_image: bool,
     hooks: Option<&'a dyn FirmwareUpdateHooks>,
 }
@@ -92,6 +93,7 @@ impl<'a, D: DMAMapping, A: ApiAlloc> FirmwareUpdater<'a, D, A> {
             dma_mapping,
             spawner,
             skip_activation: false,
+            skip_validation: false,
             verify_same_image: false,
             hooks,
         }
@@ -99,6 +101,13 @@ impl<'a, D: DMAMapping, A: ApiAlloc> FirmwareUpdater<'a, D, A> {
 
     pub fn set_skip_activation(&mut self, skip: bool) {
         self.skip_activation = skip;
+    }
+
+    /// Benchmark-only: after the download, report verify/apply success and
+    /// accept activation without verifying, copying or activating the image.
+    /// `start()` then returns once the ActivateFirmware response is sent.
+    pub fn set_skip_validation(&mut self, skip: bool) {
+        self.skip_validation = skip;
     }
 
     pub fn set_verify_same_image(&mut self, verify: bool) {
@@ -132,6 +141,17 @@ impl<'a, D: DMAMapping, A: ApiAlloc> FirmwareUpdater<'a, D, A> {
         .await?;
 
         pldm_client::pldm_wait(State::Verifying).await?;
+
+        if self.skip_validation {
+            pldm_client::pldm_set_verification_result(VerifyResult::VerifySuccess);
+            pldm_client::pldm_wait(State::Apply).await?;
+            pldm_client::pldm_set_apply_result(ApplyResult::ApplySuccess);
+            pldm_client::pldm_wait(State::Activate).await?;
+            // The responder sends the ActivateFirmware response, then completes
+            // and stops; wait for that so the response is on the wire.
+            caliptra_mcu_pldm_lib::daemon::wait_until_stopped().await;
+            return Ok(());
+        }
 
         // Download is complete, verify the image
         let flash_header = self.verify().await;

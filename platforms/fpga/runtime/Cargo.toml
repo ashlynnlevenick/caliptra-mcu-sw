@@ -99,6 +99,8 @@ test-log-flash-linear = []
 test-log-flash-usermode = ["crash-log", "userspace-log"]
 test-firmware-activate = ["firmware-update"]
 test-firmware-update-streaming = ["firmware-update"]
+# PLDM throughput benchmark: firmware-update download only (no verify/apply/activate).
+test-firmware-update-bench = ["flash-boot", "firmware-update"]
 test-fpga-flash-ctrl = ["flash-boot"]
 test-mbox-sram = []
 test-firmware-v2 = []

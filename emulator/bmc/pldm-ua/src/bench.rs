@@ -23,6 +23,16 @@ use std::time::Instant;
 /// Environment variable that enables benchmarking.
 pub const BENCH_ENV: &str = "PLDM_BENCH";
 
+/// Environment variable that selects the benchmark mode in which the device
+/// skips verify/apply/activation (firmware built with `bench-skip-validation`).
+/// Read by the test to pick the firmware and here to label the summary.
+pub const SKIP_VALIDATION_ENV: &str = "PLDM_BENCH_SKIP_VALIDATION";
+
+/// Whether `SKIP_VALIDATION_ENV` is set.
+pub fn skip_validation_requested() -> bool {
+    std::env::var_os(SKIP_VALIDATION_ENV).is_some()
+}
+
 /// Marker printed at the start of the summary.
 const BENCH_SUMMARY_HEADER: &str = "===== PLDM firmware update benchmark =====";
 
@@ -229,11 +239,22 @@ fn throughput_row(out: &mut String, name: &str, bytes: u64, ticks: u64, secs: f6
 fn summary(rec: &Recorder, exit_code: i32) -> String {
     let mut out = String::new();
     let payload = rec.component_size.unwrap_or(rec.requested_bytes);
+    // With validation skipped, phases past the download do no device work.
+    let skip_validation = skip_validation_requested();
     let _ = writeln!(out, "{BENCH_SUMMARY_HEADER}");
     let _ = writeln!(
         out,
         "exit code: {exit_code}   payload: {payload} B   chunks: {}   requested: {} B   max chunk: {} B",
         rec.chunks, rec.requested_bytes, rec.max_chunk
+    );
+    let _ = writeln!(
+        out,
+        "device-side validation: {}",
+        if skip_validation {
+            "skipped (post-download phases omitted)"
+        } else {
+            "performed"
+        }
     );
     let _ = writeln!(out);
     let _ = writeln!(
@@ -242,6 +263,9 @@ fn summary(rec: &Recorder, exit_code: i32) -> String {
         "phase", "MCU ticks", "wall (s)"
     );
     for (name, start, end, desc) in PHASES {
+        if skip_validation && *end > Milestone::TransferComplete {
+            continue;
+        }
         match rec.delta(*start, *end) {
             Some((ticks, secs)) => {
                 let _ = writeln!(out, "  {name:<14} {ticks:>14} {secs:>10.3}  {desc}");
@@ -276,8 +300,10 @@ fn summary(rec: &Recorder, exit_code: i32) -> String {
             );
         }
     }
-    if let Some((t, s)) = rec.delta(Milestone::UpdateStart, Milestone::ActivateResponse) {
-        throughput_row(&mut out, "pldm_total", payload, t, s);
+    if !skip_validation {
+        if let Some((t, s)) = rec.delta(Milestone::UpdateStart, Milestone::ActivateResponse) {
+            throughput_row(&mut out, "pldm_total", payload, t, s);
+        }
     }
     let _ = writeln!(out, "==========================================");
     out

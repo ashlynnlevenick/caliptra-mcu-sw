@@ -118,6 +118,7 @@ const FEATURES_REQUIRING_HW_2_1_RUNTIME: &[&str] = &[
     "test-flash-based-boot",
     "test-firmware-activate",
     "test-firmware-update-flash",
+    "test-firmware-update-bench",
     "test-mctp-spdm-attestation-hitless",
     "test-mctp-spdm-attestation-hitless-tcb",
     "test-mctp-spdm-attestation-hitless-mixed",

@@ -145,7 +145,12 @@ pub async fn firmware_update<D: DMAMapping>(
             EXECUTOR.get().spawner(),
             Some(&hooks),
         );
+        updater.set_skip_validation(cfg!(feature = "bench-skip-validation"));
         updater.start().await?;
+        if cfg!(feature = "bench-skip-validation") {
+            // Nothing was verified or applied: exit instead of resetting.
+            return Ok(());
+        }
     }
 
     #[cfg(feature = "test-streaming-boot-flash-write-back")]
@@ -388,9 +393,18 @@ mod flash_memory {
 
     impl ExternalFlash {
         pub async fn new() -> Result<Self, ErrorCode> {
-            Ok(ExternalFlash {
-                flash_syscall: FlashSyscall::new(STAGING_PARTITION.driver_num),
-            })
+            let flash_syscall = FlashSyscall::new(STAGING_PARTITION.driver_num);
+            // Benchmark builds also run on FPGA, whose kernel exposes the
+            // staging partition under a different driver number.
+            #[cfg(feature = "bench-skip-validation")]
+            if flash_syscall.exists().is_err() {
+                return Ok(ExternalFlash {
+                    flash_syscall: FlashSyscall::new(
+                        caliptra_mcu_config_fpga::flash::STAGING_PARTITION.driver_num,
+                    ),
+                });
+            }
+            Ok(ExternalFlash { flash_syscall })
         }
     }
 
