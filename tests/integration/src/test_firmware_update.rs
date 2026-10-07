@@ -1066,6 +1066,27 @@ mod test {
     /// Runtime feature for the HwModel PLDM benchmarks.
     const BENCH_FEATURE: &str = "test-firmware-update-bench";
 
+    /// Size of the MCU runtime image the benchmark runs, chosen the same way
+    /// as `start_runtime_hw_model` (bundle if it has the feature, else a
+    /// release build from source, which that call then reuses).
+    fn bench_runtime_image_size() -> (usize, &'static str) {
+        match FirmwareBinaries::from_env() {
+            Ok(binaries) if has_prebuilt_binaries(BENCH_FEATURE) => (
+                binaries.test_runtime(BENCH_FEATURE).unwrap().len(),
+                "prebuilt bundle",
+            ),
+            _ => {
+                let release = BuildOverrides {
+                    profile: "release",
+                    extra_features: None,
+                };
+                let path = build_runtime(BENCH_FEATURE, Some(release));
+                let size = std::fs::metadata(path).unwrap().len() as usize;
+                (size, "release, built from source")
+            }
+        }
+    }
+
     /// PLDM throughput benchmark: transfers `image` as the component payload
     /// over the HwModel (emulator or FPGA). The `test-firmware-update-bench`
     /// runtime stages each chunk but skips verify/apply/activate, then exits.
@@ -1073,11 +1094,13 @@ mod test {
     /// `xtask fpga build`) when present, otherwise it is built from source.
     fn run_hw_benchmark(label: &str, image: &[u8]) {
         let pkg = get_streaming_boot_pldm_fw_manifest(&get_device_uuid(), image);
+        let (fw_size, fw_source) = bench_runtime_image_size();
 
         // On the emulator, firmware exit ends this process from inside
         // hw.step() (after the UA exit hook prints its summary), so print the
         // header first.
         println!("benchmark: {label} (device-side validation: skipped; use wall time)");
+        println!("firmware image: {fw_size} B (MCU runtime: Tock kernel + apps; {fw_source})");
 
         env::set_var(bench::BENCH_ENV, "1");
         env::set_var(bench::SKIP_VALIDATION_ENV, "1");
